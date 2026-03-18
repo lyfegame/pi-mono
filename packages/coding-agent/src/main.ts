@@ -5,6 +5,7 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
+import type { StreamFn as AgentStreamFn } from "@mariozechner/pi-agent-core";
 import { type ImageContent, modelsAreEqual, supportsXhigh } from "@mariozechner/pi-ai";
 import chalk from "chalk";
 import { createInterface } from "readline";
@@ -808,6 +809,67 @@ export async function main(args: string[]) {
 
 	const { session, modelFallbackMessage } = await createAgentSession(sessionOptions);
 
+	// Auto-instrument with Langfuse OTel when LANGFUSE_SECRET_KEY is set.
+	// This enables trace linking for subagent spawns via TRACEPARENT propagation.
+	let langfuseCleanup: (() => Promise<void>) | undefined;
+	const runLangfuseCleanup = async () => {
+		if (!langfuseCleanup) return;
+		const cleanup = langfuseCleanup;
+		langfuseCleanup = undefined;
+		await Promise.race([cleanup(), new Promise<void>((resolve) => setTimeout(resolve, 5000))]);
+	};
+	if (process.env.LANGFUSE_SECRET_KEY) {
+		try {
+			const { createLangfuseStreamFn } = await import("@mariozechner/pi-ai/langfuse");
+			const lf = await createLangfuseStreamFn();
+			session.agent.streamFn = lf.streamFn as unknown as AgentStreamFn;
+			session.agent.setBeforeToolCall(async (ctx) => {
+				await lf.beforeToolCall({ toolCall: ctx.toolCall });
+				return undefined;
+			});
+			session.agent.setAfterToolCall(async (ctx) => {
+				await lf.afterToolCall({
+					toolCall: ctx.toolCall,
+					result: ctx.result,
+					isError: ctx.isError,
+				});
+				return undefined;
+			});
+
+			// Start a root trace from TRACEPARENT (set by parent when spawned as subagent)
+			const traceName = process.env.PI_TRACE_NAME ?? (process.env.TRACEPARENT ? "pi-subagent" : "pi-agent");
+			const traceMetadata: Record<string, string> = {
+				cwd,
+				mode,
+				isInteractive: String(isInteractive),
+				processId: String(process.pid),
+				...(session.sessionFile ? { sessionFile: session.sessionFile } : {}),
+				...(session.sessionName ? { sessionName: session.sessionName } : {}),
+			};
+			lf.startTrace(traceName, undefined, traceMetadata, session.sessionId);
+
+			langfuseCleanup = async () => {
+				const msgs = session.state.messages;
+				let lastMsg: { content?: Array<{ type: string; text?: string }> } | undefined;
+				for (let i = msgs.length - 1; i >= 0; i--) {
+					if (msgs[i].role === "assistant") {
+						lastMsg = msgs[i] as typeof lastMsg;
+						break;
+					}
+				}
+				const output =
+					lastMsg?.content
+						?.filter((c: { type: string }) => c.type === "text")
+						.map((c: { text?: string }) => c.text ?? "")
+						.join("") ?? "";
+				lf.endTrace(output);
+				await lf.shutdown();
+			};
+		} catch {
+			// Langfuse peer deps not installed — silently skip
+		}
+	}
+
 	if (!isInteractive && !session.model) {
 		console.error(chalk.red("No models available."));
 		console.error(chalk.yellow("\nSet an API key environment variable:"));
@@ -833,6 +895,7 @@ export async function main(args: string[]) {
 
 	if (mode === "rpc") {
 		await runRpcMode(session);
+		await runLangfuseCleanup();
 	} else if (isInteractive) {
 		if (scopedModels.length > 0 && (parsed.verbose || !settingsManager.getQuietStartup())) {
 			const modelList = scopedModels
@@ -854,6 +917,7 @@ export async function main(args: string[]) {
 			verbose: parsed.verbose,
 		});
 		await mode.run();
+		await runLangfuseCleanup();
 	} else {
 		await runPrintMode(session, {
 			mode,
@@ -861,6 +925,7 @@ export async function main(args: string[]) {
 			initialMessage,
 			initialImages,
 		});
+		await runLangfuseCleanup();
 		stopThemeWatcher();
 		if (process.stdout.writableLength > 0) {
 			await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
