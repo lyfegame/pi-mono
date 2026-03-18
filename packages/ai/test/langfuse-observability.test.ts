@@ -131,7 +131,7 @@ describe("Langfuse observability transcript mapping", () => {
 		mockState.observations = [];
 	});
 
-	it("preserves original thinking, text, request params, and tool calls in generation input", async () => {
+	it("preserves original json structure while trimming signature fields from generation input", async () => {
 		const instrumented = await createLangfuseStreamFn({
 			baseUrl: "https://langfuse.example",
 			publicKey: "pk-test",
@@ -161,9 +161,16 @@ describe("Langfuse observability transcript mapping", () => {
 							type: "thinking",
 							thinking:
 								"I should inspect the latest Langfuse evidence before recommending an action. I should keep the full reasoning block visible for observability.",
+							thinkingSignature: '{"id":"rs_456"}',
 						},
-						{ type: "text", text: "I’m checking the latest evidence now." },
-						{ type: "toolCall", id: "call_1", name: "shell", arguments: { command: "echo hi" } },
+						{ type: "text", text: "I’m checking the latest evidence now.", textSignature: '{"id":"msg_123"}' },
+						{
+							type: "toolCall",
+							id: "call_1",
+							name: "shell",
+							arguments: { command: "echo hi" },
+							thoughtSignature: "tool-thought-123",
+						},
 					],
 					api: "openai-responses",
 					provider: "openai",
@@ -220,6 +227,9 @@ describe("Langfuse observability transcript mapping", () => {
 			},
 		});
 		expect(JSON.stringify(generation?.attributes.input)).not.toContain("[pi observability]");
+		expect(JSON.stringify(generation?.attributes.input)).not.toContain("thinkingSignature");
+		expect(JSON.stringify(generation?.attributes.input)).not.toContain("textSignature");
+		expect(JSON.stringify(generation?.attributes.input)).not.toContain("thoughtSignature");
 	});
 
 	it("preserves original thinking blocks when a tool turn has no text", async () => {
@@ -279,7 +289,7 @@ describe("Langfuse observability transcript mapping", () => {
 		expect(JSON.stringify(generation?.attributes.input)).not.toContain("[pi observability]");
 	});
 
-	it("preserves redacted reasoning blocks instead of replacing them with placeholders", async () => {
+	it("preserves redacted reasoning blocks while trimming opaque signatures", async () => {
 		const instrumented = await createLangfuseStreamFn({
 			baseUrl: "https://langfuse.example",
 			publicKey: "pk-test",
@@ -331,9 +341,9 @@ describe("Langfuse observability transcript mapping", () => {
 		const generation = mockState.observations.find((observation) => observation.name === "gen_ai.chat");
 		const assistantEntry = findAssistantMessageWithToolCalls(generation?.attributes.input);
 		expect(assistantEntry?.content).toEqual([
-			{ type: "thinking", thinking: "", thinkingSignature: '{"id":"rs_123"}', redacted: true },
+			{ type: "thinking", thinking: "", redacted: true },
 			{ type: "toolCall", id: "call_1", name: "shell", arguments: { command: "echo hi" } },
 		]);
-		expect(JSON.stringify(generation?.attributes.input)).not.toContain("[pi observability]");
+		expect(JSON.stringify(generation?.attributes.input)).not.toContain("thinkingSignature");
 	});
 });

@@ -81,17 +81,81 @@ interface ObservabilityToolResultMessage {
 
 type ObservabilityMessage = ObservabilityUserMessage | ObservabilityAssistantMessage | ObservabilityToolResultMessage;
 
+function sanitizeUserContent(content: UserMessage["content"]): UserMessage["content"] {
+	if (typeof content === "string") {
+		return content;
+	}
+
+	return content.map((block) => {
+		if (block.type === "text") {
+			return {
+				type: "text" as const,
+				text: block.text,
+			};
+		}
+
+		return {
+			type: "image" as const,
+			data: block.data,
+			mimeType: block.mimeType,
+		};
+	});
+}
+
+function sanitizeAssistantContent(content: AssistantMessage["content"]): AssistantMessage["content"] {
+	return content.map((block) => {
+		if (block.type === "text") {
+			return {
+				type: "text" as const,
+				text: block.text,
+			};
+		}
+
+		if (block.type === "thinking") {
+			return {
+				type: "thinking" as const,
+				thinking: block.thinking,
+				...(block.redacted ? { redacted: true } : {}),
+			};
+		}
+
+		return {
+			type: "toolCall" as const,
+			id: block.id,
+			name: block.name,
+			arguments: block.arguments,
+		};
+	});
+}
+
+function sanitizeToolResultContent(content: ToolResultMessage["content"]): ToolResultMessage["content"] {
+	return content.map((block) => {
+		if (block.type === "text") {
+			return {
+				type: "text" as const,
+				text: block.text,
+			};
+		}
+
+		return {
+			type: "image" as const,
+			data: block.data,
+			mimeType: block.mimeType,
+		};
+	});
+}
+
 function contextToObservabilityMessages(context: Context): ObservabilityMessage[] {
 	const messages: ObservabilityMessage[] = [];
 
 	for (const message of context.messages) {
 		if (message.role === "user") {
-			messages.push({ role: "user", content: message.content });
+			messages.push({ role: "user", content: sanitizeUserContent(message.content) });
 			continue;
 		}
 
 		if (message.role === "assistant") {
-			messages.push({ role: "assistant", content: message.content });
+			messages.push({ role: "assistant", content: sanitizeAssistantContent(message.content) });
 			continue;
 		}
 
@@ -99,7 +163,7 @@ function contextToObservabilityMessages(context: Context): ObservabilityMessage[
 			role: "toolResult",
 			toolCallId: message.toolCallId,
 			toolName: message.toolName,
-			content: message.content,
+			content: sanitizeToolResultContent(message.content),
 			isError: message.isError,
 		});
 	}
