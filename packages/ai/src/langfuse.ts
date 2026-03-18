@@ -17,7 +17,7 @@ import { isSpanContextValid, context as otelContext, type SpanContext, trace } f
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import type { StreamFn } from "./langfuse-types.js";
 import { streamSimple } from "./stream.js";
-import type { AssistantMessageEvent, Context } from "./types.js";
+import type { AssistantMessage, AssistantMessageEvent, Context, TextContent, ThinkingContent } from "./types.js";
 import { AssistantMessageEventStream } from "./utils/event-stream.js";
 
 export interface LangfuseStreamFnOptions {
@@ -61,6 +61,52 @@ interface AgentTraceEntry {
 	inputCaptured: boolean;
 }
 
+const OBSERVABILITY_THINKING_SUMMARY_MAX_LENGTH = 240;
+const OBSERVABILITY_THINKING_SUMMARY_PREFIX = "[pi observability] reasoning summary: ";
+const OBSERVABILITY_THINKING_CAPTURED_PLACEHOLDER = "[pi observability] reasoning captured in generation output";
+
+function truncateObservabilityText(value: string, maxLength: number): string {
+	const normalized = value.replace(/\s+/g, " ").trim();
+	if (normalized.length <= maxLength) return normalized;
+
+	const truncated = normalized.slice(0, Math.max(0, maxLength - 1));
+	const boundary = truncated.lastIndexOf(" ");
+	const safeTruncate = boundary >= Math.floor(maxLength * 0.6) ? truncated.slice(0, boundary) : truncated;
+	return `${safeTruncate.trimEnd()}…`;
+}
+
+function summarizeThinkingForObservability(thinkingParts: ThinkingContent[]): string | null {
+	const visibleThinking = thinkingParts
+		.map((part) => part.thinking.trim())
+		.filter((part) => part.length > 0)
+		.join("\n\n");
+
+	if (visibleThinking.length > 0) {
+		return `${OBSERVABILITY_THINKING_SUMMARY_PREFIX}${truncateObservabilityText(
+			visibleThinking,
+			OBSERVABILITY_THINKING_SUMMARY_MAX_LENGTH,
+		)}`;
+	}
+
+	if (thinkingParts.some((part) => part.redacted || part.thinkingSignature)) {
+		return OBSERVABILITY_THINKING_CAPTURED_PLACEHOLDER;
+	}
+
+	return null;
+}
+
+function assistantContentForObservability(message: AssistantMessage): string | null {
+	const textParts = message.content.filter((content): content is TextContent => content.type === "text");
+	const visibleText = textParts
+		.map((content) => content.text)
+		.join("")
+		.trim();
+	if (visibleText.length > 0) return visibleText;
+
+	const thinkingParts = message.content.filter((content): content is ThinkingContent => content.type === "thinking");
+	return summarizeThinkingForObservability(thinkingParts);
+}
+
 function contextToOpenAIMessages(context: Context): unknown[] {
 	const messages: unknown[] = [];
 
@@ -81,10 +127,9 @@ function contextToOpenAIMessages(context: Context): unknown[] {
 						});
 			messages.push({ role: "user", content });
 		} else if (msg.role === "assistant") {
-			const textParts = msg.content.filter((c) => c.type === "text");
 			const toolCalls = msg.content.filter((c) => c.type === "toolCall");
 			const entry: Record<string, unknown> = { role: "assistant" };
-			entry.content = textParts.length > 0 ? textParts.map((c) => c.text).join("") : null;
+			entry.content = assistantContentForObservability(msg);
 			if (toolCalls.length > 0) {
 				entry.tool_calls = toolCalls.map((toolCall) => ({
 					id: toolCall.id,

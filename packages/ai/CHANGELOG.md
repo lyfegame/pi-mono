@@ -6,6 +6,10 @@
 
 - Added `gpt-5.4-mini` model support for the `openai-codex` provider with Codex pricing metadata and unit coverage.
 
+### Fixed
+
+- Fixed Langfuse assistant replay input to include an observability reasoning summary for tool-only turns, so the next chat transcript no longer looks empty except for tool calls.
+
 ## [0.60.0] - 2026-03-18
 
 ### Fixed
