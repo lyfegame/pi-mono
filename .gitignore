@@ -19,6 +19,9 @@ packages/*/dist-firefox/
 *.swo
 *~
 
+# Session and trace artifacts
+.context/
+
 # Package specific
 .npm/
 coverage/
