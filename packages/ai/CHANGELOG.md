@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed Langfuse assistant replay input to preserve full visible thinking and text for tool turns while still dropping opaque reasoning signatures, so the next chat transcript no longer looks empty except for tool calls.
+- Fixed Langfuse generation input to preserve the original structured system prompt, message blocks, tool definitions, and request parameters without adding synthetic observability prefixes or placeholders.
 
 ## [0.60.0] - 2026-03-18
 

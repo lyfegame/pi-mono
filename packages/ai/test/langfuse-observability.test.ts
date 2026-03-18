@@ -98,13 +98,29 @@ function buildDoneEvent(message: AssistantMessage): AssistantMessageEventStream 
 	return stream;
 }
 
-function findAssistantMessageWithToolCalls(input: unknown): { content: unknown; tool_calls: unknown[] } | undefined {
-	if (!Array.isArray(input)) return undefined;
-	for (const item of input) {
+function generationMessages(input: unknown): unknown[] | undefined {
+	if (typeof input !== "object" || input === null) return undefined;
+	const candidate = input as { messages?: unknown[] };
+	return Array.isArray(candidate.messages) ? candidate.messages : undefined;
+}
+
+function hasToolCallContent(content: unknown): boolean {
+	if (!Array.isArray(content)) return false;
+	return content.some((item) => {
+		if (typeof item !== "object" || item === null) return false;
+		const candidate = item as { type?: unknown };
+		return candidate.type === "toolCall";
+	});
+}
+
+function findAssistantMessageWithToolCalls(input: unknown): { content: unknown[] } | undefined {
+	const messages = generationMessages(input);
+	if (!messages) return undefined;
+	for (const item of messages) {
 		if (typeof item !== "object" || item === null) continue;
-		const candidate = item as { role?: unknown; content?: unknown; tool_calls?: unknown[] };
-		if (candidate.role === "assistant" && Array.isArray(candidate.tool_calls) && candidate.tool_calls.length > 0) {
-			return { content: candidate.content, tool_calls: candidate.tool_calls };
+		const candidate = item as { role?: unknown; content?: unknown[] };
+		if (candidate.role === "assistant" && hasToolCallContent(candidate.content)) {
+			return { content: candidate.content ?? [] };
 		}
 	}
 	return undefined;
@@ -115,7 +131,7 @@ describe("Langfuse observability transcript mapping", () => {
 		mockState.observations = [];
 	});
 
-	it("preserves full visible thinking and text for tool turns in trace input", async () => {
+	it("preserves original thinking, text, request params, and tool calls in generation input", async () => {
 		const instrumented = await createLangfuseStreamFn({
 			baseUrl: "https://langfuse.example",
 			publicKey: "pk-test",
@@ -168,25 +184,45 @@ describe("Langfuse observability transcript mapping", () => {
 			],
 		};
 
-		const stream = await instrumented.streamFn(model, context);
+		const stream = await instrumented.streamFn(model, context, { temperature: 0.4, maxTokens: 256 });
 		await stream.result();
 
 		const generation = mockState.observations.find((observation) => observation.name === "gen_ai.chat");
 		expect(generation).toBeTruthy();
-		const assistantEntry = findAssistantMessageWithToolCalls(generation?.attributes.input);
-		expect(assistantEntry).toBeTruthy();
-		expect(assistantEntry?.content).toBe(
-			`
-[pi observability] reasoning:
-I should inspect the latest Langfuse evidence before recommending an action. I should keep the full reasoning block visible for observability.
-
-[pi observability] response:
-I’m checking the latest evidence now.`.trimStart(),
-		);
-		expect(assistantEntry?.tool_calls).toHaveLength(1);
+		expect(generation?.attributes.input).toEqual({
+			systemPrompt: "You are helpful.",
+			messages: [
+				{ role: "user", content: "check health" },
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "thinking",
+							thinking:
+								"I should inspect the latest Langfuse evidence before recommending an action. I should keep the full reasoning block visible for observability.",
+						},
+						{ type: "text", text: "I’m checking the latest evidence now." },
+						{ type: "toolCall", id: "call_1", name: "shell", arguments: { command: "echo hi" } },
+					],
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_1",
+					toolName: "shell",
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+				},
+				{ role: "user", content: "what now?" },
+			],
+			request: {
+				temperature: 0.4,
+				maxTokens: 256,
+			},
+		});
+		expect(JSON.stringify(generation?.attributes.input)).not.toContain("[pi observability]");
 	});
 
-	it("preserves full visible thinking when a tool turn has no text", async () => {
+	it("preserves original thinking blocks when a tool turn has no text", async () => {
 		const instrumented = await createLangfuseStreamFn({
 			baseUrl: "https://langfuse.example",
 			publicKey: "pk-test",
@@ -233,14 +269,17 @@ I’m checking the latest evidence now.`.trimStart(),
 
 		const generation = mockState.observations.find((observation) => observation.name === "gen_ai.chat");
 		const assistantEntry = findAssistantMessageWithToolCalls(generation?.attributes.input);
-		expect(assistantEntry?.content).toBe(
-			`
-[pi observability] reasoning:
-This entire visible reasoning block should be preserved as-is for Langfuse replay input.`.trimStart(),
-		);
+		expect(assistantEntry?.content).toEqual([
+			{
+				type: "thinking",
+				thinking: "This entire visible reasoning block should be preserved as-is for Langfuse replay input.",
+			},
+			{ type: "toolCall", id: "call_1", name: "shell", arguments: { command: "echo hi" } },
+		]);
+		expect(JSON.stringify(generation?.attributes.input)).not.toContain("[pi observability]");
 	});
 
-	it("uses a placeholder when reasoning is captured only via signature", async () => {
+	it("preserves redacted reasoning blocks instead of replacing them with placeholders", async () => {
 		const instrumented = await createLangfuseStreamFn({
 			baseUrl: "https://langfuse.example",
 			publicKey: "pk-test",
@@ -291,6 +330,10 @@ This entire visible reasoning block should be preserved as-is for Langfuse repla
 
 		const generation = mockState.observations.find((observation) => observation.name === "gen_ai.chat");
 		const assistantEntry = findAssistantMessageWithToolCalls(generation?.attributes.input);
-		expect(assistantEntry?.content).toBe("[pi observability] reasoning captured in generation output");
+		expect(assistantEntry?.content).toEqual([
+			{ type: "thinking", thinking: "", thinkingSignature: '{"id":"rs_123"}', redacted: true },
+			{ type: "toolCall", id: "call_1", name: "shell", arguments: { command: "echo hi" } },
+		]);
+		expect(JSON.stringify(generation?.attributes.input)).not.toContain("[pi observability]");
 	});
 });
