@@ -115,7 +115,7 @@ describe("Langfuse observability transcript mapping", () => {
 		mockState.observations = [];
 	});
 
-	it("adds a reasoning summary to tool-only assistant turns in trace input", async () => {
+	it("preserves full visible thinking and text for tool turns in trace input", async () => {
 		const instrumented = await createLangfuseStreamFn({
 			baseUrl: "https://langfuse.example",
 			publicKey: "pk-test",
@@ -143,8 +143,10 @@ describe("Langfuse observability transcript mapping", () => {
 					content: [
 						{
 							type: "thinking",
-							thinking: "I should inspect the latest Langfuse evidence before recommending an action.",
+							thinking:
+								"I should inspect the latest Langfuse evidence before recommending an action. I should keep the full reasoning block visible for observability.",
 						},
+						{ type: "text", text: "I’m checking the latest evidence now." },
 						{ type: "toolCall", id: "call_1", name: "shell", arguments: { command: "echo hi" } },
 					],
 					api: "openai-responses",
@@ -174,9 +176,68 @@ describe("Langfuse observability transcript mapping", () => {
 		const assistantEntry = findAssistantMessageWithToolCalls(generation?.attributes.input);
 		expect(assistantEntry).toBeTruthy();
 		expect(assistantEntry?.content).toBe(
-			"[pi observability] reasoning summary: I should inspect the latest Langfuse evidence before recommending an action.",
+			`
+[pi observability] reasoning:
+I should inspect the latest Langfuse evidence before recommending an action. I should keep the full reasoning block visible for observability.
+
+[pi observability] response:
+I’m checking the latest evidence now.`.trimStart(),
 		);
 		expect(assistantEntry?.tool_calls).toHaveLength(1);
+	});
+
+	it("preserves full visible thinking when a tool turn has no text", async () => {
+		const instrumented = await createLangfuseStreamFn({
+			baseUrl: "https://langfuse.example",
+			publicKey: "pk-test",
+			secretKey: "sk-test",
+			innerStreamFn: () =>
+				buildDoneEvent({
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					api: "openai-responses",
+					provider: "openai",
+					model: "gpt-5.4",
+					usage: buildUsage(),
+					stopReason: "stop",
+					timestamp: Date.now(),
+				}),
+		});
+
+		const model = getModel("openai", "gpt-5.4");
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "check health", timestamp: 1 },
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "thinking",
+							thinking:
+								"This entire visible reasoning block should be preserved as-is for Langfuse replay input.",
+						},
+						{ type: "toolCall", id: "call_1", name: "shell", arguments: { command: "echo hi" } },
+					],
+					api: "openai-responses",
+					provider: "openai",
+					model: "gpt-5.4",
+					usage: buildUsage(),
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+			],
+		};
+
+		const stream = await instrumented.streamFn(model, context);
+		await stream.result();
+
+		const generation = mockState.observations.find((observation) => observation.name === "gen_ai.chat");
+		const assistantEntry = findAssistantMessageWithToolCalls(generation?.attributes.input);
+		expect(assistantEntry?.content).toBe(
+			`
+[pi observability] reasoning:
+This entire visible reasoning block should be preserved as-is for Langfuse replay input.`.trimStart(),
+		);
 	});
 
 	it("uses a placeholder when reasoning is captured only via signature", async () => {

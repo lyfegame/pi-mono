@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed Langfuse assistant replay input to include an observability reasoning summary for tool-only turns, so the next chat transcript no longer looks empty except for tool calls.
+- Fixed Langfuse assistant replay input to preserve full visible thinking and text for tool turns while still dropping opaque reasoning signatures, so the next chat transcript no longer looks empty except for tool calls.
 
 ## [0.60.0] - 2026-03-18
 

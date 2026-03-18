@@ -61,38 +61,15 @@ interface AgentTraceEntry {
 	inputCaptured: boolean;
 }
 
-const OBSERVABILITY_THINKING_SUMMARY_MAX_LENGTH = 240;
-const OBSERVABILITY_THINKING_SUMMARY_PREFIX = "[pi observability] reasoning summary: ";
+const OBSERVABILITY_THINKING_PREFIX = "[pi observability] reasoning:\n";
+const OBSERVABILITY_RESPONSE_PREFIX = "[pi observability] response:\n";
 const OBSERVABILITY_THINKING_CAPTURED_PLACEHOLDER = "[pi observability] reasoning captured in generation output";
 
-function truncateObservabilityText(value: string, maxLength: number): string {
-	const normalized = value.replace(/\s+/g, " ").trim();
-	if (normalized.length <= maxLength) return normalized;
-
-	const truncated = normalized.slice(0, Math.max(0, maxLength - 1));
-	const boundary = truncated.lastIndexOf(" ");
-	const safeTruncate = boundary >= Math.floor(maxLength * 0.6) ? truncated.slice(0, boundary) : truncated;
-	return `${safeTruncate.trimEnd()}…`;
-}
-
-function summarizeThinkingForObservability(thinkingParts: ThinkingContent[]): string | null {
-	const visibleThinking = thinkingParts
+function visibleThinkingForObservability(thinkingParts: ThinkingContent[]): string {
+	return thinkingParts
 		.map((part) => part.thinking.trim())
 		.filter((part) => part.length > 0)
 		.join("\n\n");
-
-	if (visibleThinking.length > 0) {
-		return `${OBSERVABILITY_THINKING_SUMMARY_PREFIX}${truncateObservabilityText(
-			visibleThinking,
-			OBSERVABILITY_THINKING_SUMMARY_MAX_LENGTH,
-		)}`;
-	}
-
-	if (thinkingParts.some((part) => part.redacted || part.thinkingSignature)) {
-		return OBSERVABILITY_THINKING_CAPTURED_PLACEHOLDER;
-	}
-
-	return null;
 }
 
 function assistantContentForObservability(message: AssistantMessage): string | null {
@@ -101,10 +78,27 @@ function assistantContentForObservability(message: AssistantMessage): string | n
 		.map((content) => content.text)
 		.join("")
 		.trim();
-	if (visibleText.length > 0) return visibleText;
 
 	const thinkingParts = message.content.filter((content): content is ThinkingContent => content.type === "thinking");
-	return summarizeThinkingForObservability(thinkingParts);
+	const visibleThinking = visibleThinkingForObservability(thinkingParts);
+
+	if (visibleThinking.length > 0 && visibleText.length > 0) {
+		return `${OBSERVABILITY_THINKING_PREFIX}${visibleThinking}\n\n${OBSERVABILITY_RESPONSE_PREFIX}${visibleText}`;
+	}
+
+	if (visibleThinking.length > 0) {
+		return `${OBSERVABILITY_THINKING_PREFIX}${visibleThinking}`;
+	}
+
+	if (visibleText.length > 0) {
+		return visibleText;
+	}
+
+	if (thinkingParts.some((part) => part.redacted || part.thinkingSignature)) {
+		return OBSERVABILITY_THINKING_CAPTURED_PLACEHOLDER;
+	}
+
+	return null;
 }
 
 function contextToOpenAIMessages(context: Context): unknown[] {
