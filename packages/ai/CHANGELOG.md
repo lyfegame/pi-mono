@@ -6,6 +6,10 @@
 
 - Added `gpt-5.4-mini` model support for the `openai-codex` provider with Codex pricing metadata and unit coverage.
 
+### Fixed
+
+- Fixed Langfuse generation input to preserve the original structured system prompt, message blocks, tool definitions, and request parameters without adding synthetic observability prefixes or placeholders.
+
 ## [0.60.0] - 2026-03-18
 
 ### Fixed

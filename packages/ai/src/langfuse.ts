@@ -17,7 +17,7 @@ import { isSpanContextValid, context as otelContext, type SpanContext, trace } f
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import type { StreamFn } from "./langfuse-types.js";
 import { streamSimple } from "./stream.js";
-import type { AssistantMessageEvent, Context } from "./types.js";
+import type { AssistantMessage, AssistantMessageEvent, Context, ToolResultMessage, UserMessage } from "./types.js";
 import { AssistantMessageEventStream } from "./utils/event-stream.js";
 
 export interface LangfuseStreamFnOptions {
@@ -61,69 +61,122 @@ interface AgentTraceEntry {
 	inputCaptured: boolean;
 }
 
-function contextToOpenAIMessages(context: Context): unknown[] {
-	const messages: unknown[] = [];
+interface ObservabilityUserMessage {
+	role: "user";
+	content: UserMessage["content"];
+}
 
-	if (context.systemPrompt) {
-		messages.push({ role: "system", content: context.systemPrompt });
+interface ObservabilityAssistantMessage {
+	role: "assistant";
+	content: AssistantMessage["content"];
+}
+
+interface ObservabilityToolResultMessage {
+	role: "toolResult";
+	toolCallId: string;
+	toolName: string;
+	content: ToolResultMessage["content"];
+	isError: boolean;
+}
+
+type ObservabilityMessage = ObservabilityUserMessage | ObservabilityAssistantMessage | ObservabilityToolResultMessage;
+
+function sanitizeUserContent(content: UserMessage["content"]): UserMessage["content"] {
+	if (typeof content === "string") {
+		return content;
 	}
 
-	for (const msg of context.messages) {
-		if (msg.role === "user") {
-			const content =
-				typeof msg.content === "string"
-					? msg.content
-					: msg.content.map((c) => {
-							if (c.type === "text") return { type: "text", text: c.text };
-							if (c.type === "image")
-								return { type: "image_url", image_url: { url: `data:${c.mimeType};base64,${c.data}` } };
-							return c;
-						});
-			messages.push({ role: "user", content });
-		} else if (msg.role === "assistant") {
-			const textParts = msg.content.filter((c) => c.type === "text");
-			const toolCalls = msg.content.filter((c) => c.type === "toolCall");
-			const entry: Record<string, unknown> = { role: "assistant" };
-			entry.content = textParts.length > 0 ? textParts.map((c) => c.text).join("") : null;
-			if (toolCalls.length > 0) {
-				entry.tool_calls = toolCalls.map((toolCall) => ({
-					id: toolCall.id,
-					type: "function",
-					function: {
-						name: toolCall.name,
-						arguments: JSON.stringify(toolCall.arguments),
-					},
-				}));
-			}
-			messages.push(entry);
-		} else if (msg.role === "toolResult") {
-			messages.push({
-				role: "tool",
-				tool_call_id: msg.toolCallId,
-				content: msg.content
-					.filter((c) => c.type === "text")
-					.map((c) => c.text)
-					.join("\n"),
-			});
+	return content.map((block) => {
+		if (block.type === "text") {
+			return {
+				type: "text" as const,
+				text: block.text,
+			};
 		}
+
+		return {
+			type: "image" as const,
+			data: block.data,
+			mimeType: block.mimeType,
+		};
+	});
+}
+
+function sanitizeAssistantContent(content: AssistantMessage["content"]): AssistantMessage["content"] {
+	return content.map((block) => {
+		if (block.type === "text") {
+			return {
+				type: "text" as const,
+				text: block.text,
+			};
+		}
+
+		if (block.type === "thinking") {
+			return {
+				type: "thinking" as const,
+				thinking: block.thinking,
+				...(block.redacted ? { redacted: true } : {}),
+			};
+		}
+
+		return {
+			type: "toolCall" as const,
+			id: block.id,
+			name: block.name,
+			arguments: block.arguments,
+		};
+	});
+}
+
+function sanitizeToolResultContent(content: ToolResultMessage["content"]): ToolResultMessage["content"] {
+	return content.map((block) => {
+		if (block.type === "text") {
+			return {
+				type: "text" as const,
+				text: block.text,
+			};
+		}
+
+		return {
+			type: "image" as const,
+			data: block.data,
+			mimeType: block.mimeType,
+		};
+	});
+}
+
+function contextToObservabilityMessages(context: Context): ObservabilityMessage[] {
+	const messages: ObservabilityMessage[] = [];
+
+	for (const message of context.messages) {
+		if (message.role === "user") {
+			messages.push({ role: "user", content: sanitizeUserContent(message.content) });
+			continue;
+		}
+
+		if (message.role === "assistant") {
+			messages.push({ role: "assistant", content: sanitizeAssistantContent(message.content) });
+			continue;
+		}
+
+		messages.push({
+			role: "toolResult",
+			toolCallId: message.toolCallId,
+			toolName: message.toolName,
+			content: sanitizeToolResultContent(message.content),
+			isError: message.isError,
+		});
 	}
 
 	return messages;
 }
 
-function contextToAgentInput(
-	model: Parameters<StreamFn>[0],
+function contextToConversationInput(
 	context: Context,
 	streamOptions?: Parameters<StreamFn>[2],
 ): Record<string, unknown> {
 	const input: Record<string, unknown> = {
-		model: {
-			api: model.api,
-			id: model.id,
-			name: model.name,
-			provider: model.provider,
-		},
-		messages: contextToOpenAIMessages(context),
+		messages: contextToObservabilityMessages(context),
 	};
 
 	if (context.systemPrompt) {
@@ -131,7 +184,7 @@ function contextToAgentInput(
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		input.tools = context.tools.map((tool) => tool.name);
+		input.tools = context.tools;
 	}
 
 	const request: Record<string, number> = {};
@@ -146,6 +199,22 @@ function contextToAgentInput(
 	}
 
 	return input;
+}
+
+function contextToAgentInput(
+	model: Parameters<StreamFn>[0],
+	context: Context,
+	streamOptions?: Parameters<StreamFn>[2],
+): Record<string, unknown> {
+	return {
+		model: {
+			api: model.api,
+			id: model.id,
+			name: model.name,
+			provider: model.provider,
+		},
+		...contextToConversationInput(context, streamOptions),
+	};
 }
 
 function parseTraceparent(traceparent: string | undefined): SpanContext | undefined {
@@ -202,7 +271,7 @@ export async function createLangfuseStreamFn(options?: LangfuseStreamFnOptions):
 		streamOptions?: Parameters<StreamFn>[2],
 	): LangfuseGeneration {
 		const attributes = {
-			input: contextToOpenAIMessages(context),
+			input: contextToConversationInput(context, streamOptions),
 			metadata: {
 				api: model.api,
 				provider: model.provider,
